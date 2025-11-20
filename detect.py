@@ -8,6 +8,13 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except ImportError:
+    GPIO_AVAILABLE = False
+    print("[WARN] RPi.GPIO not available. Buzzer functionality will be disabled.")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -46,6 +53,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to a WAV audio file to play when an animal is detected.",
     )
     parser.add_argument(
+        "--buzzer-pin",
+        type=int,
+        default=17,
+        help="GPIO pin number (BCM mode) for the piezo buzzer (default: 17).",
+    )
+    parser.add_argument(
+        "--buzzer-duration",
+        type=float,
+        default=0.5,
+        help="Duration in seconds for buzzer alert (default: 0.5).",
+    )
+    parser.add_argument(
         "--cooldown",
         type=float,
         default=2.0,
@@ -60,7 +79,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def play_sound(audio_path: Path | None) -> None:
+def activate_buzzer(buzzer_pin: int, duration: float) -> None:
+    """Activate the piezo buzzer on the specified GPIO pin."""
+    if not GPIO_AVAILABLE:
+        print("[ALERT] Animal detected! (Buzzer not available)")
+        return
+    
+    try:
+        GPIO.output(buzzer_pin, GPIO.HIGH)
+        time.sleep(duration)
+        GPIO.output(buzzer_pin, GPIO.LOW)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] Failed to activate buzzer: {exc}")
+
+
+def play_sound(audio_path: Path | None, buzzer_pin: int | None = None, buzzer_duration: float = 0.5) -> None:
+    # If on Raspberry Pi with GPIO, use the buzzer
+    if GPIO_AVAILABLE and buzzer_pin is not None:
+        activate_buzzer(buzzer_pin, buzzer_duration)
+        return
+    
+    # Otherwise, try audio playback (for testing on other platforms)
     if audio_path and audio_path.exists():
         try:
             if sys.platform.startswith("win"):
@@ -133,6 +172,13 @@ def summarize_available_weights() -> str:
 def main() -> None:
     args = parse_args()
 
+    # Initialize GPIO for buzzer if available
+    if GPIO_AVAILABLE:
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(args.buzzer_pin, GPIO.OUT)
+        GPIO.output(args.buzzer_pin, GPIO.LOW)
+        print(f"[INFO] GPIO initialized. Buzzer on pin {args.buzzer_pin}")
+
     model_path: Path | None = args.model
     if model_path is not None and not model_path.exists():
         fallback = find_fallback_weights(model_path)
@@ -203,7 +249,7 @@ def main() -> None:
 
         now = time.time()
         if detected and now - last_alert >= args.cooldown:
-            play_sound(args.audio)
+            play_sound(args.audio, args.buzzer_pin, args.buzzer_duration)
             last_alert = now
 
         cv2.imshow("Animal Detection", annotated_frame)
@@ -212,6 +258,11 @@ def main() -> None:
 
     cap.release()
     cv2.destroyAllWindows()
+    
+    # Cleanup GPIO
+    if GPIO_AVAILABLE:
+        GPIO.cleanup()
+        print("[INFO] GPIO cleaned up")
 
 
 if __name__ == "__main__":
