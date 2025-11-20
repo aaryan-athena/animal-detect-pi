@@ -1,0 +1,12 @@
+path: datasets/animals
+train: train/images
+val: val/images
+test: test/images
+
+names:
+  0: buffaloes
+  1: deers
+  2: elephants
+  3: rhinos
+  4: tigers
+  5: wild boars
