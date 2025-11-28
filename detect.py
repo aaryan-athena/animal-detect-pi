@@ -8,12 +8,25 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
+# Try gpiozero first (works on Debian 13 Trixie), fall back to RPi.GPIO
+GPIO_AVAILABLE = False
+GPIO_BACKEND = None
+
 try:
-    import RPi.GPIO as GPIO
+    from gpiozero import Buzzer
+    from gpiozero.exc import BadPinFactory
     GPIO_AVAILABLE = True
+    GPIO_BACKEND = "gpiozero"
 except ImportError:
-    GPIO_AVAILABLE = False
-    print("[WARN] RPi.GPIO not available. Buzzer functionality will be disabled.")
+    try:
+        import RPi.GPIO as GPIO
+        GPIO_AVAILABLE = True
+        GPIO_BACKEND = "rpigpio"
+    except ImportError:
+        pass
+
+if not GPIO_AVAILABLE:
+    print("[WARN] No GPIO library available (gpiozero or RPi.GPIO). Buzzer functionality will be disabled.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,19 +89,68 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Device identifier passed to Ultralytics (e.g. '0', 'cpu').",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without display window (for SSH/remote use).",
+    )
     return parser.parse_args()
+
+
+# Global buzzer instance for gpiozero
+_buzzer_instance = None
+
+
+def init_buzzer(buzzer_pin: int) -> None:
+    """Initialize the buzzer based on available GPIO backend."""
+    global _buzzer_instance
+    
+    if not GPIO_AVAILABLE:
+        return
+    
+    if GPIO_BACKEND == "gpiozero":
+        try:
+            _buzzer_instance = Buzzer(buzzer_pin)
+            print(f"[INFO] gpiozero buzzer initialized on pin {buzzer_pin}")
+        except BadPinFactory as exc:
+            print(f"[WARN] Failed to initialize gpiozero buzzer: {exc}")
+    elif GPIO_BACKEND == "rpigpio":
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(buzzer_pin, GPIO.OUT)
+        GPIO.output(buzzer_pin, GPIO.LOW)
+        print(f"[INFO] RPi.GPIO buzzer initialized on pin {buzzer_pin}")
+
+
+def cleanup_buzzer() -> None:
+    """Cleanup GPIO resources."""
+    global _buzzer_instance
+    
+    if GPIO_BACKEND == "gpiozero" and _buzzer_instance:
+        _buzzer_instance.close()
+        _buzzer_instance = None
+        print("[INFO] gpiozero buzzer cleaned up")
+    elif GPIO_BACKEND == "rpigpio":
+        GPIO.cleanup()
+        print("[INFO] RPi.GPIO cleaned up")
 
 
 def activate_buzzer(buzzer_pin: int, duration: float) -> None:
     """Activate the piezo buzzer on the specified GPIO pin."""
+    global _buzzer_instance
+    
     if not GPIO_AVAILABLE:
         print("[ALERT] Animal detected! (Buzzer not available)")
         return
     
     try:
-        GPIO.output(buzzer_pin, GPIO.HIGH)
-        time.sleep(duration)
-        GPIO.output(buzzer_pin, GPIO.LOW)
+        if GPIO_BACKEND == "gpiozero" and _buzzer_instance:
+            _buzzer_instance.on()
+            time.sleep(duration)
+            _buzzer_instance.off()
+        elif GPIO_BACKEND == "rpigpio":
+            GPIO.output(buzzer_pin, GPIO.HIGH)
+            time.sleep(duration)
+            GPIO.output(buzzer_pin, GPIO.LOW)
     except Exception as exc:  # noqa: BLE001
         print(f"[WARN] Failed to activate buzzer: {exc}")
 
@@ -172,12 +234,9 @@ def summarize_available_weights() -> str:
 def main() -> None:
     args = parse_args()
 
-    # Initialize GPIO for buzzer if available
+    # Initialize buzzer if GPIO available
     if GPIO_AVAILABLE:
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(args.buzzer_pin, GPIO.OUT)
-        GPIO.output(args.buzzer_pin, GPIO.LOW)
-        print(f"[INFO] GPIO initialized. Buzzer on pin {args.buzzer_pin}")
+        init_buzzer(args.buzzer_pin)
 
     model_path: Path | None = args.model
     if model_path is not None and not model_path.exists():
@@ -252,17 +311,21 @@ def main() -> None:
             play_sound(args.audio, args.buzzer_pin, args.buzzer_duration)
             last_alert = now
 
-        cv2.imshow("Animal Detection", annotated_frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+        if not args.headless:
+            cv2.imshow("Animal Detection", annotated_frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+        else:
+            # In headless mode, just check for keyboard interrupt
+            pass
 
     cap.release()
-    cv2.destroyAllWindows()
+    if not args.headless:
+        cv2.destroyAllWindows()
     
     # Cleanup GPIO
     if GPIO_AVAILABLE:
-        GPIO.cleanup()
-        print("[INFO] GPIO cleaned up")
+        cleanup_buzzer()
 
 
 if __name__ == "__main__":
