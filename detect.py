@@ -8,16 +8,31 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
-# Try gpiozero first (works on Debian 13 Trixie), fall back to RPi.GPIO
+# GPIO backend selection: lgpio (best for Pi 5), then gpiozero, then RPi.GPIO
 GPIO_AVAILABLE = False
 GPIO_BACKEND = None
+_lgpio_handle = None
 
+# Try lgpio first (recommended for Raspberry Pi 5 on both OS 12 and OS 13)
 try:
-    from gpiozero import Buzzer
-    from gpiozero.exc import BadPinFactory
+    import lgpio
     GPIO_AVAILABLE = True
-    GPIO_BACKEND = "gpiozero"
+    GPIO_BACKEND = "lgpio"
 except ImportError:
+    pass
+
+# Fall back to gpiozero
+if not GPIO_AVAILABLE:
+    try:
+        from gpiozero import Buzzer
+        from gpiozero.exc import BadPinFactory
+        GPIO_AVAILABLE = True
+        GPIO_BACKEND = "gpiozero"
+    except ImportError:
+        pass
+
+# Fall back to RPi.GPIO (won't work on Pi 5, but kept for older Pi models)
+if not GPIO_AVAILABLE:
     try:
         import RPi.GPIO as GPIO
         GPIO_AVAILABLE = True
@@ -26,7 +41,7 @@ except ImportError:
         pass
 
 if not GPIO_AVAILABLE:
-    print("[WARN] No GPIO library available (gpiozero or RPi.GPIO). Buzzer functionality will be disabled.")
+    print("[WARN] No GPIO library available (lgpio, gpiozero, or RPi.GPIO). Buzzer functionality will be disabled.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,16 +114,26 @@ def parse_args() -> argparse.Namespace:
 
 # Global buzzer instance for gpiozero
 _buzzer_instance = None
+_buzzer_pin_initialized = None
 
 
 def init_buzzer(buzzer_pin: int) -> None:
     """Initialize the buzzer based on available GPIO backend."""
-    global _buzzer_instance
+    global _buzzer_instance, _lgpio_handle, _buzzer_pin_initialized
     
     if not GPIO_AVAILABLE:
         return
     
-    if GPIO_BACKEND == "gpiozero":
+    if GPIO_BACKEND == "lgpio":
+        try:
+            _lgpio_handle = lgpio.gpiochip_open(0)
+            lgpio.gpio_claim_output(_lgpio_handle, buzzer_pin)
+            lgpio.gpio_write(_lgpio_handle, buzzer_pin, 0)
+            _buzzer_pin_initialized = buzzer_pin
+            print(f"[INFO] lgpio buzzer initialized on pin {buzzer_pin}")
+        except Exception as exc:
+            print(f"[WARN] Failed to initialize lgpio buzzer: {exc}")
+    elif GPIO_BACKEND == "gpiozero":
         try:
             _buzzer_instance = Buzzer(buzzer_pin)
             print(f"[INFO] gpiozero buzzer initialized on pin {buzzer_pin}")
@@ -123,9 +148,19 @@ def init_buzzer(buzzer_pin: int) -> None:
 
 def cleanup_buzzer() -> None:
     """Cleanup GPIO resources."""
-    global _buzzer_instance
+    global _buzzer_instance, _lgpio_handle, _buzzer_pin_initialized
     
-    if GPIO_BACKEND == "gpiozero" and _buzzer_instance:
+    if GPIO_BACKEND == "lgpio" and _lgpio_handle is not None:
+        try:
+            if _buzzer_pin_initialized is not None:
+                lgpio.gpio_write(_lgpio_handle, _buzzer_pin_initialized, 0)
+            lgpio.gpiochip_close(_lgpio_handle)
+            _lgpio_handle = None
+            _buzzer_pin_initialized = None
+            print("[INFO] lgpio buzzer cleaned up")
+        except Exception as exc:
+            print(f"[WARN] Failed to cleanup lgpio: {exc}")
+    elif GPIO_BACKEND == "gpiozero" and _buzzer_instance:
         _buzzer_instance.close()
         _buzzer_instance = None
         print("[INFO] gpiozero buzzer cleaned up")
@@ -136,14 +171,18 @@ def cleanup_buzzer() -> None:
 
 def activate_buzzer(buzzer_pin: int, duration: float) -> None:
     """Activate the piezo buzzer on the specified GPIO pin."""
-    global _buzzer_instance
+    global _buzzer_instance, _lgpio_handle
     
     if not GPIO_AVAILABLE:
         print("[ALERT] Animal detected! (Buzzer not available)")
         return
     
     try:
-        if GPIO_BACKEND == "gpiozero" and _buzzer_instance:
+        if GPIO_BACKEND == "lgpio" and _lgpio_handle is not None:
+            lgpio.gpio_write(_lgpio_handle, buzzer_pin, 1)
+            time.sleep(duration)
+            lgpio.gpio_write(_lgpio_handle, buzzer_pin, 0)
+        elif GPIO_BACKEND == "gpiozero" and _buzzer_instance:
             _buzzer_instance.on()
             time.sleep(duration)
             _buzzer_instance.off()
