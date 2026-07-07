@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -75,6 +76,43 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Device identifier passed to Ultralytics (e.g. '0', 'cpu').",
+    )
+    parser.add_argument(
+        "--no-save-images",
+        dest="save_images",
+        action="store_false",
+        help="Disable saving a snapshot to disk on each detection.",
+    )
+    parser.set_defaults(save_images=True)
+    parser.add_argument(
+        "--save-dir",
+        type=Path,
+        default=Path("captures"),
+        help="Directory to store detection snapshots (default: captures/).",
+    )
+    parser.add_argument(
+        "--save-cooldown",
+        type=float,
+        default=5.0,
+        help="Minimum seconds between saved snapshots (default: 5.0).",
+    )
+    parser.add_argument(
+        "--save-max-width",
+        type=int,
+        default=640,
+        help="Resize snapshots so width does not exceed this many pixels, to keep files small (default: 640).",
+    )
+    parser.add_argument(
+        "--save-quality",
+        type=int,
+        default=70,
+        help="JPEG quality 1-100 for saved snapshots; lower = smaller files (default: 70).",
+    )
+    parser.add_argument(
+        "--max-storage-mb",
+        type=float,
+        default=500.0,
+        help="Prune oldest snapshots once --save-dir exceeds this size in MB. Set 0 to disable pruning (default: 500).",
     )
     return parser.parse_args()
 
@@ -155,6 +193,57 @@ def find_fallback_weights(preferred: Path | None = None) -> Path | None:
     return None
 
 
+def save_detection_snapshot(
+    frame,
+    save_dir: Path,
+    detection_info: list[str],
+    max_width: int,
+    quality: int,
+) -> Path | None:
+    """Resize and JPEG-encode a detection frame to disk, keeping files small for Pi storage."""
+    height, width = frame.shape[:2]
+    if max_width > 0 and width > max_width:
+        scale = max_width / width
+        frame = cv2.resize(frame, (max_width, int(height * scale)), interpolation=cv2.INTER_AREA)
+
+    now = datetime.now()
+    day_dir = save_dir / now.strftime("%Y-%m-%d")
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    classes = "-".join(info.split(" ")[0] for info in detection_info) or "animal"
+    filename = f"{now.strftime('%H%M%S_%f')}_{classes}.jpg"
+    out_path = day_dir / filename
+
+    try:
+        cv2.imwrite(str(out_path), frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] Failed to save snapshot: {exc}")
+        return None
+    return out_path
+
+
+def enforce_storage_limit(save_dir: Path, max_storage_mb: float) -> None:
+    """Delete the oldest snapshots until save_dir is back under the configured size limit."""
+    if max_storage_mb <= 0 or not save_dir.exists():
+        return
+
+    files = sorted(
+        (p for p in save_dir.glob("**/*.jpg") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+    )
+    total_bytes = sum(p.stat().st_size for p in files)
+    limit_bytes = max_storage_mb * 1024 * 1024
+
+    while total_bytes > limit_bytes and files:
+        oldest = files.pop(0)
+        try:
+            size = oldest.stat().st_size
+            oldest.unlink()
+            total_bytes -= size
+        except OSError as exc:
+            print(f"[WARN] Failed to prune {oldest}: {exc}")
+
+
 def summarize_available_weights() -> str:
     runs_root = Path("runs")
     if not runs_root.exists():
@@ -205,6 +294,11 @@ def main() -> None:
     model = YOLO(str(model_path))
     cap = open_capture(args.source)
     last_alert = 0.0
+    last_save = 0.0
+
+    if args.save_images:
+        args.save_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Saving detection snapshots to {args.save_dir} (max width {args.save_max_width}px, quality {args.save_quality})")
 
     print("Press 'q' to quit.")
     while True:
@@ -251,6 +345,19 @@ def main() -> None:
         if detected and now - last_alert >= args.cooldown:
             play_sound(args.audio, args.buzzer_pin, args.buzzer_duration)
             last_alert = now
+
+        if detected and args.save_images and now - last_save >= args.save_cooldown:
+            saved_path = save_detection_snapshot(
+                annotated_frame,
+                args.save_dir,
+                detection_info,
+                args.save_max_width,
+                args.save_quality,
+            )
+            if saved_path is not None:
+                print(f"[SAVED] {saved_path}")
+                enforce_storage_limit(args.save_dir, args.max_storage_mb)
+            last_save = now
 
         cv2.imshow("Animal Detection", annotated_frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):

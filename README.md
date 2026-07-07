@@ -104,6 +104,20 @@ The detection script now includes console logs for headless operation:
 - `[INFO] Camera found and opened successfully` - confirms camera initialization
 - `[DETECTION] deers (0.87), tigers (0.92)` - logs each detection with confidence scores
 
+### Saving Detection Snapshots
+Every detection is saved as a small annotated JPEG under `captures/<date>/` for later review after pilot testing. This is on by default; images are downscaled and compressed so the Pi's SD card fills up slowly, and old snapshots are pruned automatically once the folder passes a size limit.
+
+Relevant flags:
+
+- `--no-save-images` → disable snapshot saving entirely
+- `--save-dir captures` → where snapshots are written (default: `captures/`)
+- `--save-cooldown 5.0` → minimum seconds between saved snapshots (independent of the alert cooldown)
+- `--save-max-width 640` → downscale snapshots to this width in pixels (default: 640)
+- `--save-quality 70` → JPEG quality 1-100, lower = smaller files (default: 70)
+- `--max-storage-mb 500` → once `captures/` exceeds this size, oldest snapshots are deleted first; set `0` to disable pruning
+
+At the defaults (~640px wide, quality 70) each snapshot is typically 20-40 KB, so 500 MB holds roughly 15,000-25,000 detection images.
+
  Dependencies
 
 Installed via:
@@ -173,29 +187,21 @@ All detections will be logged to console with timestamps and confidence scores.
 - Use `opencv-python-headless` to reduce dependencies
 - Disable GUI display for headless operation (already handled in script)
 
-### Optional: Run as systemd service
-Create `/etc/systemd/system/animal-detection.service`:
-```ini
-[Unit]
-Description=Animal Detection Service
-After=network.target
+### Run automatically on boot (systemd)
+A ready-made service definition and install script are provided in `deploy/`.
 
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/animal-detection-v2
-ExecStart=/home/pi/animal-detection-v2/venv/bin/python detect_and_alert.py --source 0 --conf 0.35 --deer-conf 0.65 --device cpu
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo bash deploy/install_service.sh
 ```
 
-Enable and start:
+This detects the project path and venv automatically, installs
+`/etc/systemd/system/animal-detection.service`, and enables + starts it so
+`detect.py` runs on every Pi boot and restarts automatically if it crashes.
+
 ```bash
-sudo systemctl enable animal-detection
-sudo systemctl start animal-detection
-sudo journalctl -u animal-detection -f  # View logs
+sudo systemctl status animal-detection      # check it's running
+sudo journalctl -u animal-detection -f      # view logs
+sudo bash deploy/uninstall_service.sh       # remove the service
 ```
 
 ## Useful Tips

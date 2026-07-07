@@ -1,0 +1,14 @@
+[Unit]
+Description=Animal Detection Service
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%WORKDIR%
+ExecStart=%VENV_PYTHON% %WORKDIR%/detect.py --source 0 --conf 0.35 --deer-conf 0.65 --device cpu
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
